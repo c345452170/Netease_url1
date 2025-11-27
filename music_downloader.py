@@ -305,9 +305,12 @@ class MusicDownloader:
                 file_size=file_path.stat().st_size,
                 music_info=music_info
             )
-            
-        except DownloadException:
-            raise
+
+        except DownloadException as e:
+            return DownloadResult(
+                success=False,
+                error_message=str(e)
+            )
         except requests.RequestException as e:
             return DownloadResult(
                 success=False,
@@ -375,9 +378,12 @@ class MusicDownloader:
                 file_size=file_path.stat().st_size,
                 music_info=music_info
             )
-            
-        except DownloadException:
-            raise
+
+        except DownloadException as e:
+            return DownloadResult(
+                success=False,
+                error_message=str(e)
+            )
         except aiohttp.ClientError as e:
             return DownloadResult(
                 success=False,

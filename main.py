@@ -26,7 +26,7 @@ try:
         playlist_detail, album_detail
     )
     from cookie_manager import CookieManager, CookieException
-    from music_downloader import MusicDownloader, DownloadException, AudioFormat
+    from music_downloader import DownloadResult, MusicDownloader, DownloadException, AudioFormat
 except ImportError as e:
     print(f"导入模块失败: {e}")
     print("请确保所有依赖模块存在且可用")
@@ -493,6 +493,7 @@ def download_playlist_batch():
         playlist_name = playlist_info.get('name', f"playlist_{playlist_id}")
         safe_playlist_name = api_service.downloader.sanitize_filename(f"{playlist_name}_{playlist_id}")
         target_dir = api_service.downloads_path / safe_playlist_name
+        target_dir.mkdir(parents=True, exist_ok=True)
 
         tracks = playlist_info.get('tracks', [])
         all_song_ids = [int(track['id']) for track in tracks if 'id' in track]
@@ -510,13 +511,28 @@ def download_playlist_batch():
 
         results = []
         for mid in download_ids:
-            result = api_service.downloader.download_music_file(
-                mid,
-                quality,
-                target_dir=target_dir,
-                save_cover=download_song_images
-            )
+            try:
+                result = api_service.downloader.download_music_file(
+                    mid,
+                    quality,
+                    target_dir=target_dir,
+                    save_cover=download_song_images
+                )
+            except Exception as e:
+                api_service.logger.warning(
+                    f"下载歌单歌曲 {mid} 失败: {e}\n{traceback.format_exc()}"
+                )
+                result = DownloadResult(success=False, error_message=str(e))
+
+            if not result.success:
+                api_service.logger.warning(
+                    f"歌曲 {mid} 下载失败，原因: {result.error_message or '未知错误'}"
+                )
+
             results.append(result)
+
+            # 为避免触发接口频控，适当增加间隔模拟人工操作
+            time.sleep(0.35)
 
         if download_playlist_image and playlist_info.get('coverImgUrl'):
             cover_path = target_dir / f"{safe_playlist_name}_cover.jpg"
@@ -524,18 +540,36 @@ def download_playlist_batch():
 
         success_count = len([r for r in results if r.success])
         fail_count = len(results) - success_count
+
+        if success_count == 0:
+            return APIResponse.error(
+                "歌单中的歌曲均无法下载，可能因版权限制或无可用资源", 502
+            )
+
         message = f"成功下载 {success_count} 首，失败 {fail_count} 首"
+        if fail_count:
+            message += "（无资源或请求受限的歌曲已跳过）"
 
         zip_base = target_dir.parent / target_dir.name
         zip_path = shutil.make_archive(str(zip_base), 'zip', root_dir=target_dir)
 
+        download_label = f"{safe_playlist_name}.zip"
+        # HTTP头要求ASCII，使用ASCII回退名并保留UTF-8编码的filename*供客户端识别
+        ascii_download_name = download_label.encode('ascii', 'ignore').decode() or 'playlist.zip'
+
         response = send_file(
             zip_path,
             as_attachment=True,
-            download_name=f"{safe_playlist_name}.zip"
+            download_name=ascii_download_name
         )
-        response.headers['X-Download-Message'] = message
-        response.headers['X-Download-Filename'] = quote(f"{safe_playlist_name}.zip")
+
+        # 将中文提示与文件名通过URL编码放入自定义Header，避免latin-1编码错误
+        response.headers['X-Download-Message'] = quote(message)
+        response.headers['X-Download-Filename'] = quote(download_label)
+        response.headers['Content-Disposition'] = (
+            f'attachment; filename="{ascii_download_name}"; '
+            f"filename*=UTF-8''{quote(download_label)}"
+        )
         return response
 
     except Exception as e:
