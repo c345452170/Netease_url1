@@ -553,13 +553,23 @@ def download_playlist_batch():
         zip_base = target_dir.parent / target_dir.name
         zip_path = shutil.make_archive(str(zip_base), 'zip', root_dir=target_dir)
 
+        download_label = f"{safe_playlist_name}.zip"
+        # HTTP头要求ASCII，使用ASCII回退名并保留UTF-8编码的filename*供客户端识别
+        ascii_download_name = download_label.encode('ascii', 'ignore').decode() or 'playlist.zip'
+
         response = send_file(
             zip_path,
             as_attachment=True,
-            download_name=f"{safe_playlist_name}.zip"
+            download_name=ascii_download_name
         )
-        response.headers['X-Download-Message'] = message
-        response.headers['X-Download-Filename'] = quote(f"{safe_playlist_name}.zip")
+
+        # 将中文提示与文件名通过URL编码放入自定义Header，避免latin-1编码错误
+        response.headers['X-Download-Message'] = quote(message)
+        response.headers['X-Download-Filename'] = quote(download_label)
+        response.headers['Content-Disposition'] = (
+            f'attachment; filename="{ascii_download_name}"; '
+            f"filename*=UTF-8''{quote(download_label)}"
+        )
         return response
 
     except Exception as e:
