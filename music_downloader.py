@@ -202,8 +202,12 @@ class MusicDownloader:
             lyric = lyric_result.get('lrc', {}).get('lyric', '') if lyric_result else ''
             tlyric = lyric_result.get('tlyric', {}).get('lyric', '') if lyric_result else ''
             
-            # 构建艺术家字符串
-            artists = '/'.join(artist['name'] for artist in song_detail.get('ar', []))
+            # 构建艺术家字符串，跳过空值避免类型错误
+            artists = '/'.join(
+                artist.get('name', '') or ''
+                for artist in song_detail.get('ar', [])
+                if isinstance(artist, dict) and artist.get('name')
+            )
             
             # 创建MusicInfo对象
             music_info = MusicInfo(
@@ -536,16 +540,33 @@ class MusicDownloader:
                 try:
                     pic_response = requests.get(music_info.pic_url, timeout=10)
                     pic_response.raise_for_status()
-                    
-                    from mutagen.flac import Picture
-                    picture = Picture()
-                    picture.type = 3  # Cover (front)
-                    picture.mime = 'image/jpeg'
-                    picture.desc = 'Cover'
-                    picture.data = pic_response.content
-                    audio.add_picture(picture)
-                except:
-                    pass  # 封面下载失败不影响主流程
+
+                    picture_bytes = pic_response.content
+                    max_block = 16 * 1024 * 1024 - 1024  # FLAC metadata block上限略去缓冲
+
+                    if len(picture_bytes) > max_block:
+                        try:
+                            from PIL import Image
+
+                            with Image.open(BytesIO(picture_bytes)) as img:
+                                img.thumbnail((1200, 1200))
+                                buffer = BytesIO()
+                                img.save(buffer, format='JPEG', quality=85, optimize=True)
+                                picture_bytes = buffer.getvalue()
+                        except Exception:
+                            # Pillow不可用或缩放失败则跳过封面，避免写入失败
+                            picture_bytes = b''
+
+                    if picture_bytes:
+                        from mutagen.flac import Picture
+                        picture = Picture()
+                        picture.type = 3  # Cover (front)
+                        picture.mime = 'image/jpeg'
+                        picture.desc = 'Cover'
+                        picture.data = picture_bytes
+                        audio.add_picture(picture)
+                except Exception as e:
+                    print(f"跳过FLAC封面写入: {e}")  # 封面写入失败不影响主流程
             
             audio.save()
         except Exception as e:
