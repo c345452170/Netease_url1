@@ -364,10 +364,16 @@ class NeteaseAPI:
                 
                 song_result = song_resp.json()
                 for song in song_result.get('songs', []):
+                    artist_names = [
+                        artist.get('name', '') or ''
+                        for artist in song.get('ar', [])
+                        if isinstance(artist, dict) and artist.get('name')
+                    ]
+
                     info['tracks'].append({
                         'id': song['id'],
                         'name': song['name'],
-                        'artists': '/'.join(artist['name'] for artist in song['ar']),
+                        'artists': '/'.join(artist_names) or '未知艺术家',
                         'album': song['al']['name'],
                         'picUrl': song['al']['picUrl']
                     })
