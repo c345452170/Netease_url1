@@ -21,7 +21,8 @@ from enum import Enum
 
 import requests
 from mutagen.flac import FLAC
-from mutagen.mp3 import MP3
+from mutagen import MutagenError
+from mutagen.mp3 import MP3, HeaderNotFoundError
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC, TRCK, APIC
 from mutagen.mp4 import MP4
 
@@ -494,7 +495,27 @@ class MusicDownloader:
     def _write_mp3_tags(self, file_path: Path, music_info: MusicInfo) -> None:
         """写入MP3标签"""
         try:
-            audio = MP3(str(file_path), ID3=ID3)
+            try:
+                audio = MP3(str(file_path), ID3=ID3)
+            except HeaderNotFoundError as e:
+                # 文件内容不是有效的MP3流，直接跳过标签写入避免报错
+                print(f"写入MP3标签失败: {e}")
+                return
+            except MutagenError as e:
+                # 其他mutagen解析错误同样跳过，防止阻断下载流程
+                print(f"写入MP3标签失败: 无法解析文件 ({e})")
+                return
+
+            if audio.tags is None:
+                try:
+                    audio.add_tags()
+                except MutagenError as e:
+                    print(f"写入MP3标签失败: 初始化ID3标签出错 ({e})")
+                    return
+
+            if audio.tags is None:
+                print("写入MP3标签失败: 无法初始化ID3标签")
+                return
             
             # 添加ID3标签
             audio.tags.add(TIT2(encoding=3, text=music_info.name))
