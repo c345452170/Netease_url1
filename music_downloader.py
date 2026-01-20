@@ -85,7 +85,18 @@ class DownloadException(Exception):
 
 class MusicDownloader:
     """音乐下载器主类"""
-    
+
+    QUALITY_ORDER = [
+        "dolby",
+        "jymaster",
+        "jyeffect",
+        "sky",
+        "hires",
+        "lossless",
+        "exhigh",
+        "standard"
+    ]
+
     def __init__(self, download_dir: str = "downloads", max_concurrent: int = 3):
         """
         初始化音乐下载器
@@ -108,6 +119,14 @@ class MusicDownloader:
             'flac': AudioFormat.FLAC,
             'm4a': AudioFormat.M4A
         }
+
+    def _build_quality_fallbacks(self, requested_quality: str) -> List[str]:
+        """构建音质回退列表"""
+        if requested_quality not in self.QUALITY_ORDER:
+            return [requested_quality]
+
+        start_index = self.QUALITY_ORDER.index(requested_quality)
+        return self.QUALITY_ORDER[start_index:]
 
     def sanitize_filename(self, filename: str) -> str:
         """对外暴露的文件名清理方法"""
@@ -181,15 +200,34 @@ class MusicDownloader:
             # 获取cookies
             cookies = self.cookie_manager.parse_cookies()
             
-            # 获取音乐URL信息
-            url_result = self.api.get_song_url(music_id, quality, cookies)
-            if not url_result.get('data') or not url_result['data']:
-                raise DownloadException(f"无法获取音乐ID {music_id} 的播放链接")
-            
-            song_data = url_result['data'][0]
-            download_url = song_data.get('url', '')
+            # 获取音乐URL信息（支持降级音质）
+            song_data = None
+            download_url = ""
+            selected_quality = quality
+            last_error: Optional[Exception] = None
+            for candidate_quality in self._build_quality_fallbacks(quality):
+                try:
+                    url_result = self.api.get_song_url(music_id, candidate_quality, cookies)
+                except APIException as e:
+                    last_error = e
+                    continue
+
+                if not url_result.get('data') or not url_result['data']:
+                    continue
+
+                candidate_data = url_result['data'][0]
+                candidate_url = candidate_data.get('url', '')
+                if candidate_url:
+                    song_data = candidate_data
+                    download_url = candidate_url
+                    selected_quality = candidate_quality
+                    break
+
             if not download_url:
-                raise DownloadException(f"音乐ID {music_id} 无可用的下载链接")
+                error_detail = f": {last_error}" if last_error else ""
+                raise DownloadException(
+                    f"音乐ID {music_id} 在请求音质 {quality} 及更低音质下均无可用下载链接{error_detail}"
+                )
             
             # 获取音乐详情
             detail_result = self.api.get_song_detail(music_id)
@@ -198,10 +236,15 @@ class MusicDownloader:
             
             song_detail = detail_result['songs'][0]
             
-            # 获取歌词
-            lyric_result = self.api.get_lyric(music_id, cookies)
-            lyric = lyric_result.get('lrc', {}).get('lyric', '') if lyric_result else ''
-            tlyric = lyric_result.get('tlyric', {}).get('lyric', '') if lyric_result else ''
+            # 获取歌词（失败时不影响下载）
+            lyric = ''
+            tlyric = ''
+            try:
+                lyric_result = self.api.get_lyric(music_id, cookies)
+                lyric = lyric_result.get('lrc', {}).get('lyric', '') if lyric_result else ''
+                tlyric = lyric_result.get('tlyric', {}).get('lyric', '') if lyric_result else ''
+            except APIException:
+                pass
             
             # 构建艺术家字符串，跳过空值避免类型错误
             artists = '/'.join(
@@ -222,7 +265,7 @@ class MusicDownloader:
                 download_url=download_url,
                 file_type=song_data.get('type', 'mp3').lower(),
                 file_size=song_data.get('size', 0),
-                quality=quality,
+                quality=selected_quality,
                 lyric=lyric,
                 tlyric=tlyric
             )
@@ -271,6 +314,8 @@ class MusicDownloader:
 
             # 生成文件名
             filename = f"{music_info.artists} - {music_info.name}"
+            if not music_info.pic_url:
+                filename = f"{filename} - 无封面"
             safe_filename = self._sanitize_filename(filename)
             target_dir = self._ensure_directory(target_dir or self.download_dir)
 

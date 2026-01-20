@@ -8,6 +8,7 @@
 - 健康检查
 """
 
+import csv
 import logging
 import sys
 import time
@@ -336,14 +337,23 @@ def get_song_info():
             return APIResponse.success(result, "获取歌曲信息成功")
         
         elif info_type == 'lyric':
-            result = lyric_v1(music_id, cookies)
-            return APIResponse.success(result, "获取歌词成功")
+            try:
+                result = lyric_v1(music_id, cookies)
+                lyric_text = result.get('lrc', {}).get('lyric', '') if result else ''
+                if not lyric_text:
+                    return APIResponse.success(result, "未找到歌词")
+                return APIResponse.success(result, "获取歌词成功")
+            except APIException:
+                return APIResponse.success({'lrc': {'lyric': ''}}, "未找到歌词")
         
         elif info_type == 'json':
             # 获取完整的歌曲信息（用于前端解析）
             song_info = name_v1(music_id)
             url_info = url_v1(music_id, level, cookies)
-            lyric_info = lyric_v1(music_id, cookies)
+            try:
+                lyric_info = lyric_v1(music_id, cookies)
+            except APIException:
+                lyric_info = {}
             
             if not song_info or 'songs' not in song_info or not song_info['songs']:
                 return APIResponse.error("未找到歌曲信息", 404)
@@ -510,6 +520,8 @@ def download_playlist_batch():
             return APIResponse.error("没有可下载的歌曲", 400)
 
         results = []
+        failed_records = []
+        track_lookup = {int(track['id']): track for track in tracks if 'id' in track}
         for mid in download_ids:
             try:
                 result = api_service.downloader.download_music_file(
@@ -528,6 +540,14 @@ def download_playlist_batch():
                 api_service.logger.warning(
                     f"歌曲 {mid} 下载失败，原因: {result.error_message or '未知错误'}"
                 )
+                track_info = track_lookup.get(mid, {})
+                failed_records.append({
+                    'song_id': mid,
+                    'song_name': track_info.get('name', ''),
+                    'artists': track_info.get('artists', ''),
+                    'requested_quality': quality,
+                    'error_message': result.error_message or '未知错误'
+                })
 
             results.append(result)
 
@@ -540,6 +560,19 @@ def download_playlist_batch():
 
         success_count = len([r for r in results if r.success])
         fail_count = len(results) - success_count
+
+        if failed_records:
+            failed_csv_path = target_dir / "failed_downloads.csv"
+            try:
+                with failed_csv_path.open('w', newline='', encoding='utf-8') as csv_file:
+                    writer = csv.DictWriter(
+                        csv_file,
+                        fieldnames=['song_id', 'song_name', 'artists', 'requested_quality', 'error_message']
+                    )
+                    writer.writeheader()
+                    writer.writerows(failed_records)
+            except Exception as e:
+                api_service.logger.warning(f"写入失败记录CSV失败: {e}")
 
         if success_count == 0:
             return APIResponse.error(
@@ -633,76 +666,37 @@ def download_music_api():
             return APIResponse.error("返回格式只支持 'file' 或 'json'")
         
         music_id = api_service._extract_music_id(music_id)
-        cookies = api_service._get_cookies()
-        
-        # 获取音乐基本信息
-        song_info = name_v1(music_id)
-        if not song_info or 'songs' not in song_info or not song_info['songs']:
-            return APIResponse.error("未找到音乐信息", 404)
-        
-        # 获取音乐下载链接
-        url_info = url_v1(music_id, quality, cookies)
-        if not url_info or 'data' not in url_info or not url_info['data'] or not url_info['data'][0].get('url'):
-            return APIResponse.error("无法获取音乐下载链接，可能是版权限制或音质不支持", 404)
-        
-        # 构建音乐信息
-        song_data = song_info['songs'][0]
-        url_data = url_info['data'][0]
-        
-        music_info = {
-            'id': music_id,
-            'name': song_data['name'],
-            'artist_string': ', '.join(artist['name'] for artist in song_data['ar']),
-            'album': song_data['al']['name'],
-            'pic_url': song_data['al']['picUrl'],
-            'file_type': url_data['type'],
-            'file_size': url_data['size'],
-            'duration': song_data.get('dt', 0),
-            'download_url': url_data['url']
-        }
-        
-        # 生成安全文件名
-        safe_name = f"{music_info['name']} [{quality}]"
-        safe_name = ''.join(c for c in safe_name if c not in r'<>:"/\|?*')
-        filename = f"{safe_name}.{music_info['file_type']}"
-        
-        file_path = api_service.downloads_path / filename
-        
-        # 检查文件是否已存在
-        if file_path.exists():
-            api_service.logger.info(f"文件已存在: {filename}")
-        else:
-            # 使用优化后的下载器下载
-            try:
-                download_result = api_service.downloader.download_music_file(
-                    music_id, quality
-                )
-                
-                if not download_result.success:
-                    return APIResponse.error(f"下载失败: {download_result.error_message}", 500)
-                
-                file_path = Path(download_result.file_path)
-                api_service.logger.info(f"下载完成: {filename}")
-                
-            except DownloadException as e:
-                api_service.logger.error(f"下载异常: {e}")
-                return APIResponse.error(f"下载失败: {str(e)}", 500)
-        
+        try:
+            download_result = api_service.downloader.download_music_file(music_id, quality)
+
+            if not download_result.success:
+                return APIResponse.error(f"下载失败: {download_result.error_message}", 500)
+
+            if not download_result.music_info:
+                return APIResponse.error("下载完成但缺少音乐信息", 500)
+
+            music_info = download_result.music_info
+            file_path = Path(download_result.file_path)
+            api_service.logger.info(f"下载完成: {file_path.name}")
+        except DownloadException as e:
+            api_service.logger.error(f"下载异常: {e}")
+            return APIResponse.error(f"下载失败: {str(e)}", 500)
+
         # 根据返回格式返回结果
         if return_format == 'json':
             response_data = {
-                'music_id': music_id,
-                'name': music_info['name'],
-                'artist': music_info['artist_string'],
-                'album': music_info['album'],
-                'quality': quality,
-                'quality_name': api_service._get_quality_display_name(quality),
-                'file_type': music_info['file_type'],
-                'file_size': music_info['file_size'],
-                'file_size_formatted': api_service._format_file_size(music_info['file_size']),
+                'music_id': music_info.id,
+                'name': music_info.name,
+                'artist': music_info.artists,
+                'album': music_info.album,
+                'quality': music_info.quality,
+                'quality_name': api_service._get_quality_display_name(music_info.quality),
+                'file_type': music_info.file_type,
+                'file_size': music_info.file_size,
+                'file_size_formatted': api_service._format_file_size(music_info.file_size),
                 'file_path': str(file_path.absolute()),
-                'filename': filename,
-                'duration': music_info['duration']
+                'filename': file_path.name,
+                'duration': music_info.duration
             }
             return APIResponse.success(response_data, "下载完成")
         else:
@@ -714,11 +708,11 @@ def download_music_api():
                 response = send_file(
                     str(file_path),
                     as_attachment=True,
-                    download_name=filename,
-                    mimetype=f"audio/{music_info['file_type']}"
+                    download_name=file_path.name,
+                    mimetype=f"audio/{music_info.file_type}"
                 )
                 response.headers['X-Download-Message'] = 'Download completed successfully'
-                response.headers['X-Download-Filename'] = quote(filename, safe='')
+                response.headers['X-Download-Filename'] = quote(file_path.name, safe='')
                 return response
             except Exception as e:
                 api_service.logger.error(f"发送文件失败: {e}")
