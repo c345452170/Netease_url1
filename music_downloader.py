@@ -236,10 +236,15 @@ class MusicDownloader:
             
             song_detail = detail_result['songs'][0]
             
-            # 获取歌词
-            lyric_result = self.api.get_lyric(music_id, cookies)
-            lyric = lyric_result.get('lrc', {}).get('lyric', '') if lyric_result else ''
-            tlyric = lyric_result.get('tlyric', {}).get('lyric', '') if lyric_result else ''
+            # 获取歌词（失败时不影响下载）
+            lyric = ''
+            tlyric = ''
+            try:
+                lyric_result = self.api.get_lyric(music_id, cookies)
+                lyric = lyric_result.get('lrc', {}).get('lyric', '') if lyric_result else ''
+                tlyric = lyric_result.get('tlyric', {}).get('lyric', '') if lyric_result else ''
+            except APIException:
+                pass
             
             # 构建艺术家字符串，跳过空值避免类型错误
             artists = '/'.join(
@@ -309,6 +314,8 @@ class MusicDownloader:
 
             # 生成文件名
             filename = f"{music_info.artists} - {music_info.name}"
+            if not music_info.pic_url:
+                filename = f"{filename} - 无封面"
             safe_filename = self._sanitize_filename(filename)
             target_dir = self._ensure_directory(target_dir or self.download_dir)
 

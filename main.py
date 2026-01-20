@@ -337,14 +337,23 @@ def get_song_info():
             return APIResponse.success(result, "获取歌曲信息成功")
         
         elif info_type == 'lyric':
-            result = lyric_v1(music_id, cookies)
-            return APIResponse.success(result, "获取歌词成功")
+            try:
+                result = lyric_v1(music_id, cookies)
+                lyric_text = result.get('lrc', {}).get('lyric', '') if result else ''
+                if not lyric_text:
+                    return APIResponse.success(result, "未找到歌词")
+                return APIResponse.success(result, "获取歌词成功")
+            except APIException:
+                return APIResponse.success({'lrc': {'lyric': ''}}, "未找到歌词")
         
         elif info_type == 'json':
             # 获取完整的歌曲信息（用于前端解析）
             song_info = name_v1(music_id)
             url_info = url_v1(music_id, level, cookies)
-            lyric_info = lyric_v1(music_id, cookies)
+            try:
+                lyric_info = lyric_v1(music_id, cookies)
+            except APIException:
+                lyric_info = {}
             
             if not song_info or 'songs' not in song_info or not song_info['songs']:
                 return APIResponse.error("未找到歌曲信息", 404)
