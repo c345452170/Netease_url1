@@ -44,12 +44,15 @@ class APIConstants:
     # API URLs
     SONG_URL_V1 = "https://interface3.music.163.com/eapi/song/enhance/player/url/v1"
     SONG_DETAIL_V3 = "https://interface3.music.163.com/api/v3/song/detail"
+    SONG_DETAIL_V3_FALLBACK = "https://music.163.com/api/v3/song/detail"
     LYRIC_API = "https://interface3.music.163.com/api/song/lyric"
     SEARCH_API = 'https://music.163.com/api/cloudsearch/pc'
     PLAYLIST_DETAIL_API = 'https://music.163.com/api/v6/playlist/detail'
     ALBUM_DETAIL_API = 'https://music.163.com/api/v1/album/'
     QR_UNIKEY_API = 'https://interface3.music.163.com/eapi/login/qrcode/unikey'
     QR_LOGIN_API = 'https://interface3.music.163.com/eapi/login/qrcode/client/login'
+
+    SONG_DETAIL_V3_URLS = [SONG_DETAIL_V3, SONG_DETAIL_V3_FALLBACK]
     
     # 默认配置
     DEFAULT_CONFIG = {
@@ -155,6 +158,25 @@ class NeteaseAPI:
     def __init__(self):
         self.http_client = HTTPClient()
         self.crypto_utils = CryptoUtils()
+
+    def _post_song_detail(self, data: Dict[str, Any], headers: Dict[str, str], cookies: Dict[str, str]) -> Dict[str, Any]:
+        """请求歌曲详情（带备用域名与重试）"""
+        last_error: Optional[Exception] = None
+        for url in APIConstants.SONG_DETAIL_V3_URLS:
+            for attempt in range(2):
+                try:
+                    response = requests.post(url, data=data, headers=headers, cookies=cookies, timeout=30)
+                    response.raise_for_status()
+                    return response.json()
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    last_error = e
+                    time.sleep(0.4)
+                except requests.RequestException as e:
+                    last_error = e
+                    break
+                except json.JSONDecodeError as e:
+                    raise APIException(f"解析歌曲详情响应失败: {e}")
+        raise APIException(f"获取歌曲详情请求失败: {last_error}")
     
     def get_song_url(self, song_id: int, quality: str, cookies: Dict[str, str]) -> Dict[str, Any]:
         """获取歌曲播放URL
@@ -195,11 +217,12 @@ class NeteaseAPI:
         except (json.JSONDecodeError, KeyError) as e:
             raise APIException(f"解析响应数据失败: {e}")
     
-    def get_song_detail(self, song_id: int) -> Dict[str, Any]:
+    def get_song_detail(self, song_id: int, cookies: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """获取歌曲详细信息
         
         Args:
             song_id: 歌曲ID
+            cookies: 用户cookies
             
         Returns:
             包含歌曲详细信息的字典
@@ -208,17 +231,18 @@ class NeteaseAPI:
             APIException: API调用失败时抛出
         """
         try:
+            if cookies is None:
+                cookies = {}
             data = {'c': json.dumps([{"id": song_id, "v": 0}])}
-            response = requests.post(APIConstants.SONG_DETAIL_V3, data=data, timeout=30)
-            response.raise_for_status()
-            
-            result = response.json()
+            headers = {
+                'User-Agent': APIConstants.USER_AGENT,
+                'Referer': APIConstants.REFERER
+            }
+            result = self._post_song_detail(data, headers, cookies)
             if result.get('code') != 200:
                 raise APIException(f"获取歌曲详情失败: {result.get('message', '未知错误')}")
             
             return result
-        except requests.RequestException as e:
-            raise APIException(f"获取歌曲详情请求失败: {e}")
         except json.JSONDecodeError as e:
             raise APIException(f"解析歌曲详情响应失败: {e}")
     
@@ -358,11 +382,7 @@ class NeteaseAPI:
                 batch_ids = track_ids[i:i+100]
                 song_data = {'c': json.dumps([{'id': int(sid), 'v': 0} for sid in batch_ids])}
                 
-                song_resp = requests.post(APIConstants.SONG_DETAIL_V3, data=song_data, 
-                                        headers=headers, cookies=cookies, timeout=30)
-                song_resp.raise_for_status()
-                
-                song_result = song_resp.json()
+                song_result = self._post_song_detail(song_data, headers, cookies)
                 for song in song_result.get('songs', []):
                     artist_names = [
                         artist.get('name', '') or ''
