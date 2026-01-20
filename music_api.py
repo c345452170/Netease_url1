@@ -43,6 +43,7 @@ class APIConstants:
     
     # API URLs
     SONG_URL_V1 = "https://interface3.music.163.com/eapi/song/enhance/player/url/v1"
+    SONG_URL_V1_FALLBACK = "https://music.163.com/eapi/song/enhance/player/url/v1"
     SONG_DETAIL_V3 = "https://interface3.music.163.com/api/v3/song/detail"
     SONG_DETAIL_V3_FALLBACK = "https://music.163.com/api/v3/song/detail"
     LYRIC_API = "https://interface3.music.163.com/api/song/lyric"
@@ -52,6 +53,7 @@ class APIConstants:
     QR_UNIKEY_API = 'https://interface3.music.163.com/eapi/login/qrcode/unikey'
     QR_LOGIN_API = 'https://interface3.music.163.com/eapi/login/qrcode/client/login'
 
+    SONG_URL_V1_URLS = [SONG_URL_V1, SONG_URL_V1_FALLBACK]
     SONG_DETAIL_V3_URLS = [SONG_DETAIL_V3, SONG_DETAIL_V3_FALLBACK]
     
     # 默认配置
@@ -159,6 +161,37 @@ class NeteaseAPI:
         self.http_client = HTTPClient()
         self.crypto_utils = CryptoUtils()
 
+    def _post_eapi_request(self, urls: List[str], params: str, cookies: Dict[str, str]) -> str:
+        """发送EAPI请求（带备用域名与重试）"""
+        headers = {
+            'User-Agent': APIConstants.USER_AGENT,
+            'Referer': APIConstants.REFERER,
+        }
+
+        request_cookies = APIConstants.DEFAULT_COOKIES.copy()
+        request_cookies.update(cookies)
+
+        last_error: Optional[Exception] = None
+        for url in urls:
+            for attempt in range(2):
+                try:
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        cookies=request_cookies,
+                        data={"params": params},
+                        timeout=30
+                    )
+                    response.raise_for_status()
+                    return response.text
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    last_error = e
+                    time.sleep(0.4)
+                except requests.RequestException as e:
+                    last_error = e
+                    break
+        raise APIException(f"HTTP请求失败: {last_error}")
+
     def _post_song_detail(self, data: Dict[str, Any], headers: Dict[str, str], cookies: Dict[str, str]) -> Dict[str, Any]:
         """请求歌曲详情（带备用域名与重试）"""
         last_error: Optional[Exception] = None
@@ -207,7 +240,7 @@ class NeteaseAPI:
                 payload['immerseType'] = 'c51'
             
             params = self.crypto_utils.encrypt_params(APIConstants.SONG_URL_V1, payload)
-            response_text = self.http_client.post_request(APIConstants.SONG_URL_V1, params, cookies)
+            response_text = self._post_eapi_request(APIConstants.SONG_URL_V1_URLS, params, cookies)
             
             result = json.loads(response_text)
             if result.get('code') != 200:
